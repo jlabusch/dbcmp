@@ -1,0 +1,137 @@
+#!/usr/bin/env perl
+
+use warnings;
+use strict;
+
+
+if ($#ARGV != 1){
+    print "Usage: $0 <file1> <file2>\n";
+    exit 1;
+}
+
+my $fname_a = $ARGV[0];
+my $fname_b = $ARGV[1];
+
+open(my $fh_a, "<:crlf", $ARGV[0]) || die "Couldn't open $fname_a";
+open(my $fh_b, "<:crlf", $ARGV[1]) || die "Couldn't open $fname_b";
+
+my @columns = [];
+
+sub seek_to_table_start{
+    my $fh = shift(@_);
+
+    while (<$fh>){
+        if (m/^COPY public\.([^ ]+).*\(([^)]+)\) FROM stdin.*/){
+            @columns = split(/, /, $2);
+            return $1;
+        }
+    }
+
+    return '';
+}
+
+sub parse_table{
+    my $name = shift(@_);
+    my $fh = shift(@_);
+    my %hash = ();
+
+    while (<$fh>){
+        if (m/^\\\.$/){
+            return \%hash;
+        }
+        s/\r?\n$//;
+        my @arr = split(/\t/, $_);
+        $hash{$arr[0]} = \@arr;
+    }
+
+    return \%hash;
+}
+
+sub diff_cols{
+    my $ra = shift(@_);
+    my $rb = shift(@_);
+
+    my @mod;
+
+    for (my $i = 0; $i <= $#{$ra}; $i++){
+        if ($ra->[$i] ne $rb->[$i]){
+            push @mod, $columns[$i].":".$ra->[$i]."->".$rb->[$i];
+        }
+    }
+
+    return @mod ? \@mod : undef;
+}
+
+sub diff_hashes{
+    my $ha = shift(@_);
+    my $hb = shift(@_);
+
+    my %changes = ();
+
+    my %del = ();
+    my %mod = ();
+
+    foreach (keys %{$ha}){
+        if ($hb->{$_}){
+            my $dc = diff_cols($ha->{$_}, $hb->{$_});
+            if ($dc){
+                $changes{$_} = "UPDATE($_),".join(',', @{$dc});
+            }
+            delete $hb->{$_};
+        }else{
+            $changes{$_} = "DELETE,".join(',', @{$ha->{$_}});
+        }
+    }
+
+    foreach (keys %{$hb}){
+        $changes{$_} = "INSERT,".join(',',@{$hb->{$_}});
+    }
+
+    return %changes ? \%changes : undef;
+}
+
+my $t_a = seek_to_table_start($fh_a);
+my $t_b = seek_to_table_start($fh_b);
+
+my $skip_tables = {
+    'mdl_lock_db' => 1,
+    'mdl_logstore_standard_log' => 1,
+    'mdl_task_adhoc' => 1,
+    'mdl_task_scheduled' => 1,
+    'mdl_local_queue_items' => 1,
+    'mdl_modules' => 1,
+    'mdl_sessions' => 1
+};
+
+while ($t_a){
+    while ($t_a ne $t_b){
+        if ($t_b eq ''){
+            printf STDERR "No matching table $t_a in $fname_b\n";
+            exit 2;
+        }
+        printf STDERR "Skipping $t_b in $fname_b\n";
+        $t_b = seek_to_table_start($fh_b);
+    }
+
+    if (!$skip_tables->{$t_a}){
+        my $a_rows = parse_table($fname_a, $fh_a);
+        my $b_rows = parse_table($fname_b, $fh_b);
+
+        my $diff = diff_hashes($a_rows, $b_rows);
+
+        if ($diff){
+            print "\n$t_a (".join(', ', @columns).")\n";
+        }
+
+        foreach (sort {$a <=> $b} keys %{$diff}){
+            print "${$diff}{$_}\n";
+        }
+    }
+
+    $t_a = seek_to_table_start($fh_a);
+    $t_b = seek_to_table_start($fh_b);
+}
+
+close $fh_a;
+close $fh_b;
+
