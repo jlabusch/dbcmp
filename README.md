@@ -1,5 +1,6 @@
 # dbcmp
 Quick and dirty script for diffing PostgreSQL "plain" format DB dumps.
+Tested on the `postgres:11.5` image from docker hub.
 
 ## Usage
 1. Create a dump, e.g. `pg_dump --data-only mydb > now.sql`
